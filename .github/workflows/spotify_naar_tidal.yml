@@ -1,0 +1,40 @@
+name: Spotify-lijst naar Tidal
+
+on:
+  workflow_dispatch:
+    inputs:
+      spotify_url:
+        description: "Spotify-afspeellijst (link of ID)"
+        required: true
+        default: "https://open.spotify.com/playlist/37i9dQZF1E4k1jkpry5obv"
+      tidal_playlist_id:
+        description: "Tidal playlist ID"
+        required: true
+        default: "efc92d5f-7912-453b-9576-8a63bde1dd29"
+
+jobs:
+  overzetten:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Python instellen
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Afhankelijkheden installeren
+        run: pip install -r requirements.txt
+
+      - name: Tidal sessie herstellen
+        env:
+          TIDAL_SESSION_JSON: ${{ secrets.TIDAL_SESSION_JSON }}
+        run: python normalize_session.py
+
+      - name: Lijst overzetten
+        env:
+          SPOTIFY_URL:       ${{ github.event.inputs.spotify_url }}
+          TIDAL_PLAYLIST_ID: ${{ github.event.inputs.tidal_playlist_id }}
+        run: python spotify_naar_tidal.py
