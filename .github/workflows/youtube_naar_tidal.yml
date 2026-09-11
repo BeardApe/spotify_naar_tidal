@@ -1,0 +1,39 @@
+name: YouTube-tracklist naar Tidal
+
+on:
+  workflow_dispatch:
+    inputs:
+      youtube_url:
+        description: "YouTube-video (link)"
+        required: true
+      tidal_playlist_id:
+        description: "Tidal playlist ID (leeg laten = nieuwe playlist met de naam van de video)"
+        required: false
+        default: ""
+
+jobs:
+  overzetten:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Python instellen
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Afhankelijkheden installeren
+        run: pip install -r requirements.txt yt-dlp
+
+      - name: Tidal sessie herstellen
+        env:
+          TIDAL_SESSION_JSON: ${{ secrets.TIDAL_SESSION_JSON }}
+        run: python normalize_session.py
+
+      - name: Tracklist overzetten
+        env:
+          YOUTUBE_URL:       ${{ github.event.inputs.youtube_url }}
+          TIDAL_PLAYLIST_ID: ${{ github.event.inputs.tidal_playlist_id }}
+        run: python youtube_naar_tidal.py
