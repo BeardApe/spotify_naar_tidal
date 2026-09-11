@@ -3,7 +3,9 @@ youtube_naar_tidal.py — Zet de tracklist uit een YouTube-beschrijving om naar 
 
 Wat dit doet:
 1. Haalt titel en beschrijving van de YouTube-video op (via yt-dlp, geen API-sleutel nodig)
-2. Pikt de tracklist eruit: regels zoals "00:00 Artiest - Titel", "1. Artiest – Titel" of "Artiest - Titel [Label]"
+2. Pikt de tracklist eruit, op twee manieren:
+   - de "Muziek in deze video"-strook (de horizontale kaartjes onder de beschrijving)
+   - regels in de beschrijving zoals "00:00 Artiest - Titel", "1. Artiest – Titel" of "Artiest - Titel [Label]"
 3. Zoekt elke track op in Tidal
 4. Maakt een nieuwe Tidal-playlist met de naam van de video, of vult een bestaande aan (zonder dubbels)
 5. Print op het einde wat niet gevonden werd
@@ -26,6 +28,9 @@ import sys
 import time
 from pathlib import Path
 
+import json
+
+import requests
 import tidalapi
 
 # Waar de Tidal-sessie staat: lokaal session.json, in GitHub Actions /tmp/tidal_session.json
@@ -33,6 +38,68 @@ SESSION_PATHS = [Path("session.json"), Path("/tmp/tidal_session.json")]
 
 
 # ── YouTube ──────────────────────────────────────────────────────
+def video_id(url: str) -> str:
+    """Haalt het video-ID uit een YouTube-link, ook als er &list=... achter hangt."""
+    m = re.search(r"(?:v=|youtu\.be/|shorts/)([A-Za-z0-9_-]{11})", url)
+    if not m:
+        raise RuntimeError(f"Geen YouTube-video-ID gevonden in: {url}")
+    return m.group(1)
+
+
+def get_music_section(vid: str) -> list[dict]:
+    """Leest de 'Muziek in deze video'-kaartjes uit de pagina (de horizontale strook).
+    Die staan niet in de gewone beschrijving maar in de paginadata (ytInitialData)."""
+    resp = requests.get(
+        f"https://www.youtube.com/watch?v={vid}&hl=en",
+        headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "en"},
+        cookies={"CONSENT": "YES+1", "SOCS": "CAI"},   # anders krijg je in Europa de cookiemuur
+        timeout=15,
+    )
+    m = re.search(r"ytInitialData\s*=\s*(\{.*?\});\s*</script>", resp.text, re.S)
+    if not m:
+        return []
+    try:
+        data = json.loads(m.group(1))
+    except json.JSONDecodeError:
+        return []
+
+    tracks = []
+
+    def text(node) -> str:
+        if isinstance(node, str):
+            return node
+        if isinstance(node, dict):
+            if "simpleText" in node:
+                return node["simpleText"]
+            if "runs" in node:
+                return "".join(r.get("text", "") for r in node["runs"])
+        return ""
+
+    def walk(node):
+        if isinstance(node, dict):
+            if "infoRows" in node:            # één muziekkaartje
+                song = artist = ""
+                for row in node["infoRows"]:
+                    r = row.get("infoRowRenderer", {})
+                    label = text(r.get("title")).strip().upper()
+                    value = text(r.get("defaultMetadata") or r.get("expandedMetadata")).strip()
+                    if label in ("SONG", "NUMMER"):
+                        song = value
+                    elif label in ("ARTIST", "ARTIEST"):
+                        artist = value
+                if song and artist:
+                    tracks.append({"artist": artist.split(",")[0].strip(), "title": song})
+                return
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(data)
+    return tracks
+
+
 def get_youtube_info(url: str) -> tuple[str, str]:
     """Haalt titel en beschrijving op met yt-dlp. Geeft (titel, beschrijving)."""
     cmd = [sys.executable, "-m", "yt_dlp", "--skip-download", "--no-warnings",
@@ -130,12 +197,24 @@ def main():
     if not youtube_url:
         sys.exit("Geef een YouTube-link mee: python youtube_naar_tidal.py https://www.youtube.com/watch?v=XXXX")
 
-    print("YouTube-beschrijving lezen...")
+    vid = video_id(youtube_url)
+    youtube_url = f"https://www.youtube.com/watch?v={vid}"
+
+    print("YouTube lezen...")
     video_title, description = get_youtube_info(youtube_url)
-    yt_tracks = parse_tracklist(description)
-    print(f"  '{video_title}': {len(yt_tracks)} tracks herkend in de beschrijving\n")
+    from_cards = get_music_section(vid)
+    from_text  = parse_tracklist(description)
+    print(f"  '{video_title}': {len(from_cards)} tracks in de muziekstrook, {len(from_text)} in de beschrijving\n")
+
+    # samenvoegen zonder dubbels: eerst de kaartjes (die zijn het betrouwbaarst), dan de tekst
+    yt_tracks, seen = [], set()
+    for tr in from_cards + from_text:
+        key = clean(tr["artist"]) + "|" + clean(tr["title"])
+        if key not in seen:
+            seen.add(key)
+            yt_tracks.append(tr)
     if not yt_tracks:
-        sys.exit("Geen tracklist gevonden. Staat ze wel in de beschrijving, in de vorm 'Artiest - Titel'?")
+        sys.exit("Geen tracklist gevonden, niet in de muziekstrook en niet in de beschrijving.")
 
     print("Inloggen bij Tidal...")
     session = load_tidal_session()
